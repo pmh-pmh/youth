@@ -197,7 +197,7 @@ def process_team_events(df, gender):
             avg_base = score_sum / k
             final_base = avg_base * 2
             for province, _ in group:
-                # 判断是否包含 MR
+                # ---------- 修改点：判断是否包含 MR ----------
                 if '是否破纪录' in event_data.columns:
                     record_mask = (event_data['单位'] == province) & (
                         event_data['是否破纪录'].astype(str).str.contains('MR', case=False, na=False)
@@ -206,6 +206,7 @@ def process_team_events(df, gender):
                 else:
                     record_broken = pd.DataFrame()
                 final_score = final_base + (5 if not record_broken.empty else 0)
+                # ------------------------------------------
                 if '竞走' in event_name:
                     category = '竞走团体'
                 elif '跳远' in event_name:
@@ -240,9 +241,11 @@ def process_individual_and_relay(df, gender):
         else:
             category = '个人（接力）'
             final_score = score
+        # ---------- 修改点：判断是否包含 MR ----------
         record_val = row.get('是否破纪录', '')
         if isinstance(record_val, str) and 'MR' in record_val.upper():
             final_score += 5
+        # ------------------------------------------
         results.append({'单位': row['单位'], '类别': category, '积分': final_score})
     return pd.DataFrame(results)
 
@@ -257,9 +260,11 @@ def process_mixed_relay(df, gender):
         if pd.isna(score) or score == 0:
             continue
         final_score = score
+        # ---------- 修改点：判断是否包含 MR ----------
         record_val = row.get('是否破纪录', '')
         if isinstance(record_val, str) and 'MR' in record_val.upper():
             final_score += 2.5
+        # ------------------------------------------
         results.append({'单位': row['单位'], '类别': '混合接力', '积分': final_score})
     return pd.DataFrame(results)
 
@@ -445,41 +450,24 @@ st.set_page_config(page_title="青运会团体总分 & 项群明细 & 奖牌榜"
 st.title("🏆 第二届青少年田径运动会 - 自动算分系统")
 st.markdown("---")
 
-# ---------- 文件上传区域 ----------
-st.subheader("📤 上传数据文件")
-uploaded_file = st.file_uploader(
-    "请上传 Excel 数据文件（格式必须为 .xlsx，列名包含：项目、性别、单位、成绩、积分、名次等）",
-    type=['xlsx'],
-    help="上传后系统会自动计算并展示结果，无需修改 GitHub 仓库。"
-)
+excel_path = os.path.join(os.path.dirname(__file__), "自动算分.xlsx")
+if not os.path.exists(excel_path):
+    st.error(f"❌ 找不到文件：{excel_path}\n请确保 '自动算分.xlsx' 与程序在同一目录。")
+    st.stop()
 
-if uploaded_file is not None:
-    try:
-        df = pd.read_excel(uploaded_file, dtype={'单位': str})
-        st.success("✅ 数据加载成功！")
-    except Exception as e:
-        st.error(f"读取Excel失败：{e}")
-        st.stop()
-else:
-    # 若未上传，尝试读取仓库中默认的 `自动算分.xlsx`
-    excel_path = os.path.join(os.path.dirname(__file__), "自动算分.xlsx")
-    if os.path.exists(excel_path):
-        try:
-            df = pd.read_excel(excel_path, dtype={'单位': str})
-            st.info("📂 正在使用仓库默认数据。如需更新数据，请上传新文件。")
-        except Exception as e:
-            st.error(f"读取默认Excel失败：{e}")
-            st.stop()
-    else:
-        st.warning("⚠️ 请上传 Excel 文件以开始计算。")
-        st.stop()
+try:
+    df = pd.read_excel(excel_path, dtype={'单位': str})
+    st.success("✅ 数据加载成功！修改Excel并保存后，页面将自动刷新。")
+except Exception as e:
+    st.error(f"读取Excel失败：{e}")
+    st.stop()
 
-# ========== 计算数据 ==========
+# 计算数据
 reports = generate_team_report(df)
 group_details = generate_group_details(df)
 medal_data = generate_medal_by_category(df)
 
-# ========== 1. 团体总分 ==========
+# ========== 1. 团体总分（最先展示） ==========
 st.header("📊 团体总分")
 col1, col2 = st.columns(2)
 with col1:
@@ -514,7 +502,7 @@ else:
     st.warning("未生成项群数据，请检查是否有符合项群计分规则的项目（前8名且达标）。")
 st.markdown("---")
 
-# ========== 3. 奖牌榜（移至底部） ==========
+# ========== 3. 奖牌榜（移到最下面） ==========
 st.header("🥇 奖牌榜")
 if medal_data:
     tabs = st.tabs(["🏅 总榜", "🏃 个人", "🏃‍♂️‍➡️ 接力", "👥 团体"])
@@ -546,17 +534,20 @@ else:
     st.warning("未生成奖牌数据，请检查是否有名次列或奖牌记录。")
 st.markdown("---")
 
-# ========== 4. 导出按钮 ==========
+# ========== 4. 导出按钮（保持最后） ==========
 def export_all_data():
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # 团体总分
         if '男' in reports:
             reports['男'].to_excel(writer, sheet_name='男子团体', index=False)
         if '女' in reports:
             reports['女'].to_excel(writer, sheet_name='女子团体', index=False)
+        # 项群
         for group_name, df_group in group_details.items():
             sheet_name = group_name[:31]
             df_group.to_excel(writer, sheet_name=sheet_name, index=False)
+        # 奖牌榜
         if medal_data:
             for category, df_medal in medal_data.items():
                 sheet_name = category[:31]
@@ -571,6 +562,7 @@ st.download_button(
     use_container_width=True
 )
 
-st.caption("📌 破纪录加分：Excel中'是否破纪录'列填写 **MR**（不区分大小写，如 MR、MR (PB) 等）即自动加分。")
-st.caption("📌 竞走团体取前3名，其他团体取前2名，已实现并列平均分。")
-st.caption("📌 奖牌榜按项目类别（个人、接力、团体）分别统计，混合接力归入接力类。")
+st.caption("💡 修改Excel并保存后，页面将自动刷新。")
+st.caption("📌 破纪录加分：在Excel中新增'是否破纪录'列，填写 **MR**（不区分大小写，如 MR 或 MR (PB) 等，只要包含 MR 即可）系统自动加相应分数。")
+st.caption("📌 竞走团体取前3名，其他团体取前2名，已按规程实现并列平均分。")
+st.caption("📌 奖牌榜按项目类别（个人、接力、团体）分别统计金、银、铜牌数，混合接力归入接力类。")
