@@ -199,7 +199,6 @@ def process_team_events(df, gender):
             for province, _ in group:
                 # ---------- 修改点：判断是否包含 MR ----------
                 if '是否破纪录' in event_data.columns:
-                    # 检查该单位在该项目中是否有任何一条记录包含 MR（不区分大小写）
                     record_mask = (event_data['单位'] == province) & (
                         event_data['是否破纪录'].astype(str).str.contains('MR', case=False, na=False)
                     )
@@ -468,10 +467,44 @@ reports = generate_team_report(df)
 group_details = generate_group_details(df)
 medal_data = generate_medal_by_category(df)
 
-# ----- 奖牌榜（按类别）-----
+# ========== 1. 团体总分（最先展示） ==========
+st.header("📊 团体总分")
+col1, col2 = st.columns(2)
+with col1:
+    st.subheader("👨 男子团体")
+    if '男' in reports:
+        df_men = reports['男']
+        st.dataframe(df_men, column_config=center_column_config(df_men), width='stretch', height=400, hide_index=True)
+    else:
+        st.info("暂无男子数据")
+with col2:
+    st.subheader("👩 女子团体")
+    if '女' in reports:
+        df_women = reports['女']
+        st.dataframe(df_women, column_config=center_column_config(df_women), width='stretch', height=400, hide_index=True)
+    else:
+        st.info("暂无女子数据")
+st.markdown("---")
+
+# ========== 2. 项群明细 ==========
+st.header("🏅 五个项群明细（前8名）")
+if group_details:
+    ordered_groups = ['接力', '跨栏', '跳跃', '投掷', '竞走']
+    tabs = st.tabs(ordered_groups)
+    for tab, group_name in zip(tabs, ordered_groups):
+        with tab:
+            if group_name in group_details:
+                df_group = group_details[group_name]
+                st.dataframe(df_group, column_config=center_column_config(df_group), width='stretch', height=350, hide_index=True)
+            else:
+                st.info(f"暂无 {group_name} 数据")
+else:
+    st.warning("未生成项群数据，请检查是否有符合项群计分规则的项目（前8名且达标）。")
+st.markdown("---")
+
+# ========== 3. 奖牌榜（移到最下面） ==========
 st.header("🥇 奖牌榜")
 if medal_data:
-    # 总榜放在最前
     tabs = st.tabs(["🏅 总榜", "🏃 个人", "🏃‍♂️‍➡️ 接力", "👥 团体"])
     with tabs[0]:
         if '总榜' in medal_data:
@@ -501,42 +534,7 @@ else:
     st.warning("未生成奖牌数据，请检查是否有名次列或奖牌记录。")
 st.markdown("---")
 
-# ----- 团体总分 -----
-st.header("📊 团体总分")
-col1, col2 = st.columns(2)
-with col1:
-    st.subheader("👨 男子团体")
-    if '男' in reports:
-        df_men = reports['男']
-        st.dataframe(df_men, column_config=center_column_config(df_men), width='stretch', height=400, hide_index=True)
-    else:
-        st.info("暂无男子数据")
-with col2:
-    st.subheader("👩 女子团体")
-    if '女' in reports:
-        df_women = reports['女']
-        st.dataframe(df_women, column_config=center_column_config(df_women), width='stretch', height=400, hide_index=True)
-    else:
-        st.info("暂无女子数据")
-st.markdown("---")
-
-# ----- 项群明细 -----
-st.header("🏅 五个项群明细（前8名）")
-if group_details:
-    ordered_groups = ['接力', '跨栏', '跳跃', '投掷', '竞走']
-    tabs = st.tabs(ordered_groups)
-    for tab, group_name in zip(tabs, ordered_groups):
-        with tab:
-            if group_name in group_details:
-                df_group = group_details[group_name]
-                st.dataframe(df_group, column_config=center_column_config(df_group), width='stretch', height=350, hide_index=True)
-            else:
-                st.info(f"暂无 {group_name} 数据")
-else:
-    st.warning("未生成项群数据，请检查是否有符合项群计分规则的项目（前8名且达标）。")
-st.markdown("---")
-
-# ----- 导出按钮 -----
+# ========== 4. 导出按钮（保持最后） ==========
 def export_all_data():
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
