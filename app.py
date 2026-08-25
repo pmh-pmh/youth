@@ -8,35 +8,31 @@ import io
 # ==================== 配置区 ====================
 
 TEAM_KEYWORDS = ['团体']               # 团体项目
-MIXED_KEYWORDS = ['混合接力']          # 混合接力
 ALLROUND_KEYWORDS = ['全能']           # 全能
 
-# ----- 项群精确映射 -----
+# ----- 项群映射（只保留代表性的小项名称，匹配时采用包含关系） -----
 GROUP_ITEMS = {
     '接力': {
-        '男4×100米接力', '女4×100米接力',
-        '男4×400米接力', '女4×400米接力',
-        '混合4×100米混合接力'
+        '4×100米接力', '4x100米接力', '4*100米接力',
+        '4×400米接力', '4x400米接力', '4*400米接力'
     },
     '跨栏': {
-        '男110米栏', '女100米栏',
-        '男400米栏', '女400米栏'
+        '110米栏', '100米栏',
+        '400米栏'
     },
     '跳跃': {
-        '男跳高', '男撑竿跳高',
-        '男跳远', '男三级跳远'
+        '跳高', '撑竿跳高', '撑杆跳高',
+        '跳远', '三级跳远'
     },
     '投掷': {
-        '女铅球（旋转）', '女链球',
-        '女铁饼', '女标枪'
+        '铅球', '链球', '铁饼', '标枪'
     },
     '竞走': {
-        '男5000米竞走', '女5000米竞走',
-        '混合2×5000米竞走混合接力'
+        '5000米竞走', '竞走接力'   # 包含混合竞走和男女竞走
     }
 }
 
-# 成绩达标线
+# 成绩达标线（注意：竞走时间为分钟，其他为秒或米）
 STANDARDS = {
     '男110米栏': 13.30,
     '女100米栏': 13.80,
@@ -50,8 +46,8 @@ STANDARDS = {
     '女链球': 69.00,
     '女铁饼': 53.00,
     '女标枪': 57.00,
-    '男5000米竞走': 21.00,
-    '女5000米竞走': 23.20,
+    '男5000米竞走': 21.00,       # 21:00 正确
+    '女5000米竞走': 23.3333,     # 修正为 23:20
 }
 
 # ==================== 工具函数 ====================
@@ -74,7 +70,8 @@ def parse_time_to_seconds(time_val):
         return np.nan
 
 def extract_core_event(full_name):
-    pattern = r'^(男子|女子)(U\d+组)?(.*)$'
+    # 去除性别前缀（包括混合）
+    pattern = r'^(男子|女子|混合)(U\d+组)?(.*)$'
     match = re.match(pattern, full_name)
     if match:
         return match.group(3).strip()
@@ -83,14 +80,17 @@ def extract_core_event(full_name):
 def get_event_group(row):
     gender = row['性别']
     core = extract_core_event(row['项目'])
+    # 投掷单独处理（包含关键词）
     if any(k in core for k in ['铅球', '链球', '铁饼', '标枪']):
         return '投掷'
     key = gender + core
+    # 遍历所有项群，采用包含匹配
     for group, items in GROUP_ITEMS.items():
         if group == '投掷':
             continue
-        if key in items:
-            return group
+        for item in items:
+            if item in key:
+                return group
     return None
 
 def check_standard(row):
@@ -98,7 +98,7 @@ def check_standard(row):
     gender = row['性别']
     score = row['成绩']
     core = extract_core_event(event)
-    # 投掷
+    # 投掷（达标线已在 STANDARDS 中定义）
     if any(k in core for k in ['铅球', '链球', '铁饼', '标枪']):
         if '铅球' in core:
             std = STANDARDS.get('女铅球（旋转）')
@@ -118,31 +118,40 @@ def check_standard(row):
             return False
         return val >= std
     if '接力' in core:
-        return True
+        return True   # 接力项目不设个人达标线
+    # 其他个人项目
     key = gender + core
     if key not in STANDARDS:
-        return True
+        return True   # 没有设置达标线的，默认达标
     std = STANDARDS[key]
-    if isinstance(score, str) and ':' in score:
+    # 竞走项目特殊处理（标准值为分钟，转为秒比较）
+    if '竞走' in core:
         seconds = parse_time_to_seconds(score)
         if pd.isna(seconds):
             return False
-        if '竞走' in core:
-            std_seconds = std * 60
-            return seconds <= std_seconds
-        else:
-            return seconds <= std
+        std_seconds = std * 60
+        return seconds <= std_seconds
     else:
-        try:
-            val = float(score)
-        except:
-            return False
-        if any(k in core for k in ['栏', '竞走']):
-            return val <= std
+        # 其他项目（跨栏、跳跃等）
+        if isinstance(score, str) and ':' in score:
+            seconds = parse_time_to_seconds(score)
+            if pd.isna(seconds):
+                return False
+            return seconds <= std
         else:
-            return val >= std
+            try:
+                val = float(score)
+            except:
+                return False
+            # 投掷、跳跃类（数值越大越好）已经提前处理，这里处理跨栏等
+            if any(k in core for k in ['栏']):
+                return val <= std
+            else:
+                # 跳跃类标准为成绩下限，但跳跃已在前面投掷中处理了？这里保守处理
+                # 实际上跳跃类项目已经包含在 STANDARDS 中，按数值比较
+                return val >= std
 
-# ==================== 团体总分计算（含并列、破纪录） ====================
+# ==================== 团体总分计算 ====================
 
 def get_best_two_or_three_sum(group_df, event_name):
     province_scores = {}
@@ -171,7 +180,7 @@ def process_team_events(df, gender):
     mask = (df['性别'] == gender) & (df['项目'].str.contains('|'.join(TEAM_KEYWORDS), na=False))
     team_df = df[mask].copy()
     if team_df.empty:
-        return pd.DataFrame(columns=['单位', '类别', '积分'])
+        return pd.DataFrame(columns=['单位', '类别', '积分', '破纪录加分'])
     results = []
     for event_name, event_data in team_df.groupby('项目'):
         province_scores = get_best_two_or_three_sum(event_data, event_name)
@@ -197,16 +206,13 @@ def process_team_events(df, gender):
             avg_base = score_sum / k
             final_base = avg_base * 2
             for province, _ in group:
-                # ---------- 修改点：判断是否包含 MR ----------
+                bonus = 0
                 if '是否破纪录' in event_data.columns:
                     record_mask = (event_data['单位'] == province) & (
                         event_data['是否破纪录'].astype(str).str.contains('MR', case=False, na=False)
                     )
-                    record_broken = event_data[record_mask]
-                else:
-                    record_broken = pd.DataFrame()
-                final_score = final_base + (5 if not record_broken.empty else 0)
-                # ------------------------------------------
+                    if not event_data[record_mask].empty:
+                        bonus = 5
                 if '竞走' in event_name:
                     category = '竞走团体'
                 elif '跳远' in event_name:
@@ -221,81 +227,100 @@ def process_team_events(df, gender):
                     category = '标枪团体'
                 else:
                     category = '投掷团体'
-                results.append({'单位': province, '类别': category, '积分': final_score})
+                results.append({
+                    '单位': province,
+                    '类别': category,
+                    '积分': final_base,
+                    '破纪录加分': bonus
+                })
             rank += k
     return pd.DataFrame(results)
 
 def process_individual_and_relay(df, gender):
-    mask = (df['性别'] == gender) & (~df['项目'].str.contains('|'.join(TEAM_KEYWORDS), na=False)) & (~df['项目'].str.contains('|'.join(MIXED_KEYWORDS), na=False))
+    mask = (df['性别'] == gender) & (~df['项目'].str.contains('|'.join(TEAM_KEYWORDS), na=False))
     filtered = df[mask].copy()
     if filtered.empty:
-        return pd.DataFrame(columns=['单位', '类别', '积分'])
+        return pd.DataFrame(columns=['单位', '类别', '积分', '破纪录加分'])
+    
+    bonus_used = set()
     results = []
     for _, row in filtered.iterrows():
         score = row['积分']
-        if pd.isna(score) or score == 0:
+        if pd.isna(score):
             continue
         if any(kw in row['项目'] for kw in ALLROUND_KEYWORDS):
             category = '全能'
-            final_score = score * 2
+            base_score = score * 2
         else:
             category = '个人（接力）'
-            final_score = score
-        # ---------- 修改点：判断是否包含 MR ----------
+            base_score = score
+        bonus = 0
         record_val = row.get('是否破纪录', '')
         if isinstance(record_val, str) and 'MR' in record_val.upper():
-            final_score += 5
-        # ------------------------------------------
-        results.append({'单位': row['单位'], '类别': category, '积分': final_score})
-    return pd.DataFrame(results)
-
-def process_mixed_relay(df, gender):
-    mask = (df['性别'] == gender) & (df['项目'].str.contains('|'.join(MIXED_KEYWORDS), na=False))
-    mixed = df[mask].copy()
-    if mixed.empty:
-        return pd.DataFrame(columns=['单位', '类别', '积分'])
-    results = []
-    for _, row in mixed.iterrows():
-        score = row['积分']
-        if pd.isna(score) or score == 0:
-            continue
-        final_score = score
-        # ---------- 修改点：判断是否包含 MR ----------
-        record_val = row.get('是否破纪录', '')
-        if isinstance(record_val, str) and 'MR' in record_val.upper():
-            final_score += 2.5
-        # ------------------------------------------
-        results.append({'单位': row['单位'], '类别': '混合接力', '积分': final_score})
+            name = row.get('姓名', '')
+            if pd.isna(name) or str(name).strip() == '':
+                key = (row['单位'], row['项目'])
+            else:
+                key = (row['单位'], row['项目'], str(name).strip())
+            if key not in bonus_used:
+                bonus = 5
+                bonus_used.add(key)
+        results.append({
+            '单位': row['单位'],
+            '类别': category,
+            '积分': base_score,
+            '破纪录加分': bonus
+        })
     return pd.DataFrame(results)
 
 def generate_team_report(df):
-    mixed_mask = df['项目'].str.contains('|'.join(MIXED_KEYWORDS), na=False)
-    mixed_rows = []
-    for _, row in df[mixed_mask].iterrows():
-        men_row = row.copy()
-        men_row['性别'] = '男'
-        men_row['积分'] = row['积分'] * 0.5 if not pd.isna(row['积分']) else 0
-        mixed_rows.append(men_row)
-        women_row = row.copy()
-        women_row['性别'] = '女'
-        women_row['积分'] = row['积分'] * 0.5 if not pd.isna(row['积分']) else 0
-        mixed_rows.append(women_row)
-    df_mixed = pd.DataFrame(mixed_rows)
-    df_clean = df[~mixed_mask].copy()
-    df_all = pd.concat([df_clean, df_mixed], ignore_index=True)
-    
+    # 混合项目（性别列='混合'）拆分
+    mixed_mask = (df['性别'] == '混合')
+    mixed_df = df[mixed_mask].copy()
+    non_mixed_df = df[~mixed_mask].copy()
+
+    mixed_results = []
+    if not mixed_df.empty:
+        for (unit, event), group in mixed_df.groupby(['单位', '项目']):
+            score = group.iloc[0]['积分']
+            bonus = 0
+            if '是否破纪录' in group.columns:
+                if group['是否破纪录'].astype(str).str.contains('MR', case=False, na=False).any():
+                    bonus = 5
+            mixed_results.append({
+                '单位': unit,
+                '类别': '混合接力',
+                '积分': score * 0.5,
+                '破纪录加分': bonus * 0.5,
+                '性别': '男'
+            })
+            mixed_results.append({
+                '单位': unit,
+                '类别': '混合接力',
+                '积分': score * 0.5,
+                '破纪录加分': bonus * 0.5,
+                '性别': '女'
+            })
+    mixed_df_processed = pd.DataFrame(mixed_results) if mixed_results else pd.DataFrame(columns=['单位', '类别', '积分', '破纪录加分', '性别'])
+
     reports = {}
     men_cols = ['个人（接力）', '全能', '竞走团体', '跳远团体', '混合接力']
     women_cols = ['个人（接力）', '全能', '竞走团体', '铅球团体', '铁饼团体', '链球团体', '标枪团体', '混合接力']
-    
+
     for gender in ['男', '女']:
-        team_df = process_team_events(df_all, gender)
-        indiv_df = process_individual_and_relay(df_all, gender)
-        mixed_df = process_mixed_relay(df_all, gender)
-        combined = pd.concat([team_df, indiv_df, mixed_df], ignore_index=True)
+        team_df = process_team_events(non_mixed_df, gender)
+        indiv_df = process_individual_and_relay(non_mixed_df, gender)
+        mixed_gender_df = mixed_df_processed[mixed_df_processed['性别'] == gender].drop(columns=['性别'])
+
+        combined = pd.concat([team_df, indiv_df, mixed_gender_df], ignore_index=True)
         if combined.empty:
             continue
+
         pivot = combined.pivot_table(index='单位', columns='类别', values='积分', aggfunc='sum', fill_value=0).reset_index()
+        bonus_total = combined.groupby('单位')['破纪录加分'].sum().reset_index()
+        bonus_total.columns = ['单位', '破纪录加分']
+        pivot = pivot.merge(bonus_total, on='单位', how='left').fillna({'破纪录加分': 0})
+
         if gender == '男':
             expected_cols = men_cols
         else:
@@ -303,11 +328,14 @@ def generate_team_report(df):
         for col in expected_cols:
             if col not in pivot.columns:
                 pivot[col] = 0
-        pivot = pivot[['单位'] + expected_cols]
-        pivot['总分'] = pivot[expected_cols].sum(axis=1)
+
+        pivot['总分'] = pivot[expected_cols].sum(axis=1) + pivot['破纪录加分']
         pivot = pivot.sort_values('总分', ascending=False).reset_index(drop=True)
         pivot.insert(0, '排名', range(1, len(pivot) + 1))
+        final_cols = ['排名', '单位', '总分'] + expected_cols + ['破纪录加分']
+        pivot = pivot[final_cols]
         reports[gender] = pivot
+
     return reports
 
 # ==================== 项群明细 ====================
@@ -334,30 +362,27 @@ def generate_group_details(df):
         if group_data.empty:
             continue
         pivot = group_data.pivot_table(index='单位', columns='小项', values='积分', aggfunc='sum', fill_value=0).reset_index()
+        # 根据group_name填充可能缺失的列（用于展示）
         expected_items = list(GROUP_ITEMS[group_name])
-        for item in expected_items:
-            if item not in pivot.columns:
-                pivot[item] = 0
-        pivot['项群合计'] = pivot[expected_items].sum(axis=1)
+        # 但实际列名可能不同，我们不需要强制加列，而是保留透视已有的列
+        # 为了展示，我们只保留实际存在的列
+        pivot['项群合计'] = pivot.drop(columns=['单位']).sum(axis=1)
         pivot = pivot.sort_values('项群合计', ascending=False).reset_index(drop=True)
         pivot.insert(0, '排名', range(1, len(pivot) + 1))
         pivot = pivot[pivot['排名'] <= 8]
-        cols = ['排名', '单位', '项群合计'] + expected_items
+        # 列顺序：排名、单位、项群合计 + 其他所有小项列
+        cols = ['排名', '单位', '项群合计'] + [c for c in pivot.columns if c not in ['排名', '单位', '项群合计']]
         pivot = pivot[cols]
         result[group_name] = pivot
     return result
 
-# ==================== 奖牌榜统计（按项目类别） ====================
+# ==================== 奖牌榜统计 ====================
 
 def generate_medal_by_category(df):
-    """
-    返回一个字典，键为 '个人'、'接力'、'团体'，值为DataFrame（排名, 单位, 金牌, 银牌, 铜牌, 总数）
-    """
-    medal_records = []  # (单位, 名次, 类别)
+    medal_records = []
 
-    # 1. 个人项目（不含接力、团体）
-    individual_mask = (~df['项目'].str.contains('|'.join(TEAM_KEYWORDS), na=False)) & \
-                      (~df['项目'].str.contains('|'.join(MIXED_KEYWORDS), na=False))
+    # 个人项目（非混合、非团体）
+    individual_mask = (~df['项目'].str.contains('|'.join(TEAM_KEYWORDS), na=False)) & (df['性别'] != '混合')
     indiv_df = df[individual_mask].copy()
     if '名次' in indiv_df.columns:
         indiv_df = indiv_df[indiv_df['名次'].isin([1,2,3])]
@@ -368,7 +393,7 @@ def generate_medal_by_category(df):
                 '类别': '个人'
             })
 
-    # 2. 接力项目（包含“接力”关键词，包括混合接力）
+    # 接力项目（包含"接力"关键词，包括混合接力）
     relay_mask = df['项目'].str.contains('接力', na=False)
     relay_df = df[relay_mask].copy()
     if '名次' in relay_df.columns:
@@ -380,11 +405,10 @@ def generate_medal_by_category(df):
                 '类别': '接力'
             })
 
-    # 3. 团体项目（包含“团体”关键词）
+    # 团体项目
     team_mask = df['项目'].str.contains('|'.join(TEAM_KEYWORDS), na=False)
     team_df = df[team_mask].copy()
     if not team_df.empty:
-        # 按性别、项目分组计算名次（与团体总分逻辑一致）
         for gender in team_df['性别'].unique():
             for event_name in team_df[team_df['性别'] == gender]['项目'].unique():
                 event_data = team_df[(team_df['性别'] == gender) & (team_df['项目'] == event_name)]
@@ -408,7 +432,6 @@ def generate_medal_by_category(df):
         return {}
 
     medal_df = pd.DataFrame(medal_records)
-    # 按类别分组生成透视表
     result = {}
     categories = ['个人', '接力', '团体']
     for cat in categories:
@@ -425,7 +448,6 @@ def generate_medal_by_category(df):
         pivot.insert(0, '排名', range(1, len(pivot)+1))
         result[cat] = pivot
 
-    # 总榜（所有类别合计）
     total_pivot = medal_df.pivot_table(index='单位', columns='名次', aggfunc='size', fill_value=0).reset_index()
     for col in [1,2,3]:
         if col not in total_pivot.columns:
@@ -438,10 +460,9 @@ def generate_medal_by_category(df):
 
     return result
 
-# ==================== 辅助函数：生成居中对齐的列配置 ====================
+# ==================== 辅助函数 ====================
 
 def center_column_config(df):
-    """为DataFrame的每一列生成居中对齐的Column配置"""
     return {col: st.column_config.Column(alignment="center") for col in df.columns}
 
 # ==================== Streamlit 界面 ====================
@@ -457,17 +478,15 @@ if not os.path.exists(excel_path):
 
 try:
     df = pd.read_excel(excel_path, dtype={'单位': str})
-    st.success("✅ 数据加载成功！修改Excel并保存后，页面将自动刷新。")
+    st.success("✅ 数据加载成功！")
 except Exception as e:
     st.error(f"读取Excel失败：{e}")
     st.stop()
 
-# 计算数据
 reports = generate_team_report(df)
 group_details = generate_group_details(df)
 medal_data = generate_medal_by_category(df)
 
-# ========== 1. 团体总分（最先展示） ==========
 st.header("📊 团体总分")
 col1, col2 = st.columns(2)
 with col1:
@@ -486,7 +505,6 @@ with col2:
         st.info("暂无女子数据")
 st.markdown("---")
 
-# ========== 2. 项群明细 ==========
 st.header("🏅 五个项群明细（前8名）")
 if group_details:
     ordered_groups = ['接力', '跨栏', '跳跃', '投掷', '竞走']
@@ -502,7 +520,6 @@ else:
     st.warning("未生成项群数据，请检查是否有符合项群计分规则的项目（前8名且达标）。")
 st.markdown("---")
 
-# ========== 3. 奖牌榜（移到最下面） ==========
 st.header("🥇 奖牌榜")
 if medal_data:
     tabs = st.tabs(["🏅 总榜", "🏃 个人", "🏃‍♂️‍➡️ 接力", "👥 团体"])
@@ -534,20 +551,16 @@ else:
     st.warning("未生成奖牌数据，请检查是否有名次列或奖牌记录。")
 st.markdown("---")
 
-# ========== 4. 导出按钮（保持最后） ==========
 def export_all_data():
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # 团体总分
         if '男' in reports:
             reports['男'].to_excel(writer, sheet_name='男子团体', index=False)
         if '女' in reports:
             reports['女'].to_excel(writer, sheet_name='女子团体', index=False)
-        # 项群
         for group_name, df_group in group_details.items():
             sheet_name = group_name[:31]
             df_group.to_excel(writer, sheet_name=sheet_name, index=False)
-        # 奖牌榜
         if medal_data:
             for category, df_medal in medal_data.items():
                 sheet_name = category[:31]
@@ -562,7 +575,6 @@ st.download_button(
     use_container_width=True
 )
 
-st.caption("💡 修改Excel并保存后，页面将自动刷新。")
-st.caption("📌 破纪录加分：在Excel中新增'是否破纪录'列，填写 **MR**（不区分大小写，如 MR 或 MR (PB) 等，只要包含 MR 即可）系统自动加相应分数。")
-st.caption("📌 竞走团体取前3名，其他团体取前2名，已按规程实现并列平均分。")
-st.caption("📌 奖牌榜按项目类别（个人、接力、团体）分别统计金、银、铜牌数，混合接力归入接力类。")
+st.caption("📌 混合项目（性别列='混合'）：名次分和破纪录加分（5分）均男女各半。")
+st.caption("📌 破纪录加分：同一运动员在同一项目中只计一次（不同运动员分别计分）。")
+st.caption("📌 竞走团体取前3名，其他团体取前2名，已实现并列平均分。")
