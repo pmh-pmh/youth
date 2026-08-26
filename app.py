@@ -10,7 +10,7 @@ import io
 TEAM_KEYWORDS = ['团体']               # 团体项目
 ALLROUND_KEYWORDS = ['全能']           # 全能
 
-# ----- 项群映射（只保留代表性的小项名称，匹配时采用包含关系） -----
+# ----- 项群映射（接力、跨栏、竞走恢复为原来的具体项目列表） -----
 GROUP_ITEMS = {
     '接力': {
         '4×100米接力', '4x100米接力', '4*100米接力',
@@ -20,19 +20,13 @@ GROUP_ITEMS = {
         '110米栏', '100米栏',
         '400米栏'
     },
-    '跳跃': {
-        '跳高', '撑竿跳高', '撑杆跳高',
-        '跳远', '三级跳远'
-    },
-    '投掷': {
-        '铅球', '链球', '铁饼', '标枪'
-    },
     '竞走': {
-        '5000米竞走', '竞走接力'   # 包含混合竞走和男女竞走
+        '5000米竞走', '竞走接力'
     }
 }
+# 跳跃和投掷不再依赖 GROUP_ITEMS，而是在 get_event_group 中单独处理
 
-# 成绩达标线（注意：竞走时间为分钟，其他为秒或米）
+# 成绩达标线（竞走时间以分钟为单位）
 STANDARDS = {
     '男110米栏': 13.30,
     '女100米栏': 13.80,
@@ -46,8 +40,8 @@ STANDARDS = {
     '女链球': 69.00,
     '女铁饼': 53.00,
     '女标枪': 57.00,
-    '男5000米竞走': 21.00,       # 21:00 正确
-    '女5000米竞走': 23.3333,     # 修正为 23:20
+    '男5000米竞走': 21.00,       # 21:00
+    '女5000米竞走': 23.3333,     # 23:20
 }
 
 # ==================== 工具函数 ====================
@@ -70,7 +64,6 @@ def parse_time_to_seconds(time_val):
         return np.nan
 
 def extract_core_event(full_name):
-    # 去除性别前缀（包括混合）
     pattern = r'^(男子|女子|混合)(U\d+组)?(.*)$'
     match = re.match(pattern, full_name)
     if match:
@@ -78,19 +71,32 @@ def extract_core_event(full_name):
     return full_name.strip()
 
 def get_event_group(row):
+    """
+    返回项群名称（接力、跨栏、跳跃、投掷、竞走）
+    跳跃和投掷采用性别+关键词匹配，其他项群使用 GROUP_ITEMS 中的具体项目列表进行包含匹配
+    """
     gender = row['性别']
     core = extract_core_event(row['项目'])
-    # 投掷单独处理（包含关键词）
-    if any(k in core for k in ['铅球', '链球', '铁饼', '标枪']):
-        return '投掷'
-    key = gender + core
-    # 遍历所有项群，采用包含匹配
-    for group, items in GROUP_ITEMS.items():
-        if group == '投掷':
-            continue
-        for item in items:
+    key = gender + core  # 完整项目名（如“男跳远”）
+    
+    # 1. 跳跃：只限男子，且包含指定项目名
+    if gender == '男':
+        if any(k in core for k in ['跳高', '撑竿跳高', '撑杆跳高', '跳远', '三级跳远']):
+            return '跳跃'
+    
+    # 2. 投掷：只限女子，且包含指定项目名（铅球必须含“旋转”）
+    if gender == '女':
+        if '铅球' in core and '旋转' in core:
+            return '投掷'
+        if any(k in core for k in ['链球', '铁饼', '标枪']):
+            return '投掷'
+    
+    # 3. 接力、跨栏、竞走：使用 GROUP_ITEMS 中的具体项目进行包含匹配
+    for group in ['接力', '跨栏', '竞走']:
+        for item in GROUP_ITEMS[group]:
             if item in key:
                 return group
+    
     return None
 
 def check_standard(row):
@@ -98,9 +104,10 @@ def check_standard(row):
     gender = row['性别']
     score = row['成绩']
     core = extract_core_event(event)
-    # 投掷（达标线已在 STANDARDS 中定义）
-    if any(k in core for k in ['铅球', '链球', '铁饼', '标枪']):
-        if '铅球' in core:
+    
+    # 投掷（只针对女子项目）
+    if gender == '女':
+        if '铅球' in core and '旋转' in core:
             std = STANDARDS.get('女铅球（旋转）')
         elif '链球' in core:
             std = STANDARDS.get('女链球')
@@ -109,22 +116,25 @@ def check_standard(row):
         elif '标枪' in core:
             std = STANDARDS.get('女标枪')
         else:
-            return True
-        if std is None:
-            return True
-        try:
-            val = float(score)
-        except:
-            return False
-        return val >= std
+            std = None
+        if std is not None:
+            try:
+                val = float(score)
+                return val >= std
+            except:
+                return False
+        # 如果不是上述投掷项目，继续往下走
+    
+    # 接力（不设个人达标线）
     if '接力' in core:
-        return True   # 接力项目不设个人达标线
-    # 其他个人项目
+        return True
+    
+    # 其他个人项目（包括跳跃、跨栏、竞走等）
     key = gender + core
     if key not in STANDARDS:
-        return True   # 没有设置达标线的，默认达标
+        return True  # 无达标线要求，默认达标
+    
     std = STANDARDS[key]
-    # 竞走项目特殊处理（标准值为分钟，转为秒比较）
     if '竞走' in core:
         seconds = parse_time_to_seconds(score)
         if pd.isna(seconds):
@@ -132,7 +142,6 @@ def check_standard(row):
         std_seconds = std * 60
         return seconds <= std_seconds
     else:
-        # 其他项目（跨栏、跳跃等）
         if isinstance(score, str) and ':' in score:
             seconds = parse_time_to_seconds(score)
             if pd.isna(seconds):
@@ -143,12 +152,10 @@ def check_standard(row):
                 val = float(score)
             except:
                 return False
-            # 投掷、跳跃类（数值越大越好）已经提前处理，这里处理跨栏等
             if any(k in core for k in ['栏']):
                 return val <= std
             else:
-                # 跳跃类标准为成绩下限，但跳跃已在前面投掷中处理了？这里保守处理
-                # 实际上跳跃类项目已经包含在 STANDARDS 中，按数值比较
+                # 跳跃类标准为成绩下限（数值越大越好）
                 return val >= std
 
 # ==================== 团体总分计算 ====================
@@ -282,7 +289,7 @@ def generate_team_report(df):
     mixed_results = []
     if not mixed_df.empty:
         for (unit, event), group in mixed_df.groupby(['单位', '项目']):
-            score = group.iloc[0]['积分']
+            score = group['积分'].sum()
             bonus = 0
             if '是否破纪录' in group.columns:
                 if group['是否破纪录'].astype(str).str.contains('MR', case=False, na=False).any():
@@ -341,36 +348,43 @@ def generate_team_report(df):
 # ==================== 项群明细 ====================
 
 def generate_group_details(df):
+    # 过滤：只保留积分>0、非团体、非全能，并且赛次为“决赛”（如果有赛次列）
     mask = (~df['项目'].str.contains('|'.join(TEAM_KEYWORDS), na=False)) & \
            (~df['项目'].str.contains('|'.join(ALLROUND_KEYWORDS), na=False)) & \
            (df['积分'] > 0) & (df['积分'].notna())
+    
+    # 如果有“赛次”列，只保留值为“决赛”的行（忽略大小写和空格）
+    if '赛次' in df.columns:
+        df['赛次_clean'] = df['赛次'].astype(str).str.strip().str.lower()
+        mask = mask & (df['赛次_clean'] == '决赛')
+    
     filtered = df[mask].copy()
     if filtered.empty:
         return {}
+    
     filtered['项群'] = filtered.apply(get_event_group, axis=1)
     filtered = filtered[filtered['项群'].notna()]
     if filtered.empty:
         return {}
+    
     filtered['达标'] = filtered.apply(check_standard, axis=1)
     filtered = filtered[filtered['达标'] == True]
     if filtered.empty:
         return {}
+    
     filtered['小项'] = filtered.apply(lambda row: row['性别'] + extract_core_event(row['项目']), axis=1)
     result = {}
-    for group_name in GROUP_ITEMS.keys():
+    # 固定项群顺序
+    ordered_groups = ['接力', '跨栏', '跳跃', '投掷', '竞走']
+    for group_name in ordered_groups:
         group_data = filtered[filtered['项群'] == group_name].copy()
         if group_data.empty:
             continue
         pivot = group_data.pivot_table(index='单位', columns='小项', values='积分', aggfunc='sum', fill_value=0).reset_index()
-        # 根据group_name填充可能缺失的列（用于展示）
-        expected_items = list(GROUP_ITEMS[group_name])
-        # 但实际列名可能不同，我们不需要强制加列，而是保留透视已有的列
-        # 为了展示，我们只保留实际存在的列
         pivot['项群合计'] = pivot.drop(columns=['单位']).sum(axis=1)
         pivot = pivot.sort_values('项群合计', ascending=False).reset_index(drop=True)
         pivot.insert(0, '排名', range(1, len(pivot) + 1))
         pivot = pivot[pivot['排名'] <= 8]
-        # 列顺序：排名、单位、项群合计 + 其他所有小项列
         cols = ['排名', '单位', '项群合计'] + [c for c in pivot.columns if c not in ['排名', '单位', '项群合计']]
         pivot = pivot[cols]
         result[group_name] = pivot
@@ -381,7 +395,6 @@ def generate_group_details(df):
 def generate_medal_by_category(df):
     medal_records = []
 
-    # 个人项目（非混合、非团体）
     individual_mask = (~df['项目'].str.contains('|'.join(TEAM_KEYWORDS), na=False)) & (df['性别'] != '混合')
     indiv_df = df[individual_mask].copy()
     if '名次' in indiv_df.columns:
@@ -393,7 +406,6 @@ def generate_medal_by_category(df):
                 '类别': '个人'
             })
 
-    # 接力项目（包含"接力"关键词，包括混合接力）
     relay_mask = df['项目'].str.contains('接力', na=False)
     relay_df = df[relay_mask].copy()
     if '名次' in relay_df.columns:
@@ -405,7 +417,6 @@ def generate_medal_by_category(df):
                 '类别': '接力'
             })
 
-    # 团体项目
     team_mask = df['项目'].str.contains('|'.join(TEAM_KEYWORDS), na=False)
     team_df = df[team_mask].copy()
     if not team_df.empty:
@@ -575,6 +586,9 @@ st.download_button(
     use_container_width=True
 )
 
+st.caption("📌 项群明细仅统计赛次为“决赛”的成绩（若Excel有“赛次”列）。")
+st.caption("📌 跳跃仅限男子，投掷仅限女子且铅球必须含“旋转”。")
+st.caption("📌 接力、跨栏、竞走使用原有项目列表进行匹配，规则不变。")
 st.caption("📌 混合项目（性别列='混合'）：名次分和破纪录加分（5分）均男女各半。")
 st.caption("📌 破纪录加分：同一运动员在同一项目中只计一次（不同运动员分别计分）。")
 st.caption("📌 竞走团体取前3名，其他团体取前2名，已实现并列平均分。")
